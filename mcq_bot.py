@@ -1,18 +1,26 @@
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+import os
 import re
+import asyncio
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 import openai
 
-# ====== CONFIG ======
-BOT_TOKEN = "8067802179:AAFises245Wos6A36affylDp8YYoZUkkb14"
-OPENAI_API_KEY = "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"
+# ========= ENVIRONMENT VARIABLES =========
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 openai.api_key = OPENAI_API_KEY
 
 user_mode = {}
 user_settings = {}
 
-# ====== COMMANDS ======
+# ========= COMMANDS =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_settings[update.effective_user.id] = {
         "level": "Moderate",
@@ -23,32 +31,93 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📘 MCQ Bot Ready\n\n"
         "/upload – Upload MCQs\n"
         "/generate – Auto-create MCQs\n"
-        "/level – Easy / Moderate / Tough\n"
-        "/exam – SSC CGL / WBCS\n"
-        "/lang – English / Bengali"
+        "/level – Toggle difficulty\n"
+        "/exam – Toggle exam\n"
+        "/lang – Toggle language"
     )
 
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_mode[update.effective_user.id] = "upload"
-    await update.message.reply_text("📥 Paste MCQs now.\nMark correct option with *")
+    await update.message.reply_text(
+        "📥 Paste MCQs now.\n"
+        "Mark correct option with *"
+    )
 
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_mode[update.effective_user.id] = "generate"
     await update.message.reply_text("✍ Send topic or text for MCQs")
 
 async def level(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_settings[update.effective_user.id]["level"] = "Tough"
-    await update.message.reply_text("✅ Level set to Tough")
+    s = user_settings[update.effective_user.id]
+    s["level"] = {"Easy": "Moderate", "Moderate": "Tough", "Tough": "Easy"}[s["level"]]
+    await update.message.reply_text(f"✅ Level set to {s['level']}")
 
 async def exam(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_settings[update.effective_user.id]["exam"] = "WBCS"
-    await update.message.reply_text("✅ Exam set to WBCS")
+    s = user_settings[update.effective_user.id]
+    s["exam"] = "WBCS" if s["exam"] == "SSC CGL" else "SSC CGL"
+    await update.message.reply_text(f"✅ Exam set to {s['exam']}")
 
 async def lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_settings[update.effective_user.id]["lang"] = "Bengali"
-    await update.message.reply_text("✅ Language set to Bengali")
+    s = user_settings[update.effective_user.id]
+    s["lang"] = "Bengali" if s["lang"] == "English" else "English"
+    await update.message.reply_text(f"✅ Language set to {s['lang']}")
 
-# ====== HANDLER ======
+# ========= AI GENERATION =========
+def generate_mcqs(topic, s):
+    prompt = f"""
+Create 5 {s['level']} level MCQs for {s['exam']}.
+Language: {s['lang']}
+Topic/Text: {topic}
+
+Rules:
+- Competitive exam standard
+- 4 options only
+- Mark correct option with *
+- Strict format
+
+Q1.
+A)
+B)
+C) *
+D)
+"""
+
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.6
+    )
+
+    return response.choices[0].message.content
+
+# ========= MCQ POSTER =========
+async def post_mcqs(update: Update, text: str):
+    blocks = re.split(r"\n\n+", text)
+
+    for block in blocks:
+        lines = block.strip().split("\n")
+        if len(lines) < 5:
+            continue
+
+        question = lines[0]
+        options = []
+        correct_id = 0
+
+        for i, line in enumerate(lines[1:5]):
+            if "*" in line:
+                correct_id = i
+                line = line.replace("*", "")
+            options.append(line[3:].strip())
+
+        await update.message.reply_poll(
+            question=question,
+            options=options,
+            type="quiz",
+            correct_option_id=correct_id,
+            is_anonymous=False
+        )
+
+# ========= MESSAGE HANDLER =========
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     mode = user_mode.get(uid)
@@ -57,60 +126,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await post_mcqs(update, update.message.text)
 
     elif mode == "generate":
-        settings = user_settings[uid]
-        mcqs = ai_generate_mcqs(update.message.text, settings)
+        mcqs = generate_mcqs(update.message.text, user_settings[uid])
         await post_mcqs(update, mcqs)
 
-# ====== AI FUNCTION ======
-def ai_generate_mcqs(topic, s):
-    prompt = f"""
-Create 5 {s['level']} level MCQs for {s['exam']}.
-Language: {s['lang']}
-Topic/Text: {topic}
-
-Rules:
-- Competitive exam standard
-- 4 options
-- Mark correct option with *
-- Strict format
-"""
-
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7
-    )
-
-    return response.choices[0].message.content
-
-# ====== MCQ POSTER ======
-async def post_mcqs(update, text):
-    blocks = re.split(r"\n\n+", text)
-
-    for b in blocks:
-        lines = b.strip().split("\n")
-        if len(lines) < 5:
-            continue
-
-        question = lines[0]
-        options = []
-        correct = 0
-
-        for i, opt in enumerate(lines[1:5]):
-            if "*" in opt:
-                correct = i
-                opt = opt.replace("*", "")
-            options.append(opt[3:].strip())
-
-        await update.message.reply_poll(
-            question=question,
-            options=options,
-            type="quiz",
-            correct_option_id=correct,
-            is_anonymous=False
-        )
-
-# ====== MAIN ======
+# ========= MAIN =========
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -125,5 +144,4 @@ async def main():
     await app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
